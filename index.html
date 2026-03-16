@@ -41,16 +41,11 @@
     import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
     import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, deleteDoc } from 'firebase/firestore';
 
-    // --- FIREBASE INITIALIZATION ---
-    // If you host this on your own GitHub Pages, you will need to replace the empty {} below 
-    // with your own Firebase project configuration object to enable saving progress!
-    // Import the functions you need from the SDKs you need
-    import { initializeApp } from "firebase/app";
-    // TODO: Add SDKs for Firebase products that you want to use
-    // https://firebase.google.com/docs/web/setup#available-libraries
-    
-    // Your web app's Firebase configuration
-    const fallbackConfig = {
+    // ============================================================================
+    // ⚠️ FIREBASE CONFIGURATION ⚠️
+    // Paste your Firebase keys below between the quotes to enable saving on GitHub.
+    // ============================================================================
+    const MY_FIREBASE_SETTINGS = {
       apiKey: "AIzaSyB0t-rl_hFGrxk5AjTxZzicjSgstc7lU7Q",
       authDomain: "aerospace-medicine-qbank.firebaseapp.com",
       projectId: "aerospace-medicine-qbank",
@@ -58,17 +53,16 @@
       messagingSenderId: "1085728932203",
       appId: "1:1085728932203:web:c948d750b4560a726c8c2e"
     };
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig); 
+    // ============================================================================
     
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : fallbackConfig;
+    const isCanvasEnv = typeof __firebase_config !== 'undefined';
+    const activeConfig = isCanvasEnv ? JSON.parse(__firebase_config) : MY_FIREBASE_SETTINGS;
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'aero-med-quiz-app';
     
     let app, auth, db;
     try {
-      if (Object.keys(firebaseConfig).length > 0) {
-        app = initializeApp(firebaseConfig);
+      if (activeConfig && activeConfig.apiKey && activeConfig.apiKey.length > 0) {
+        app = initializeApp(activeConfig);
         auth = getAuth(app);
         db = getFirestore(app);
       } else {
