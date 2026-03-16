@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aerospace Medicine Quiz</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- React & ReactDOM (Production) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel (Compiles React JSX in the browser) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase Import Map for Native Browser Modules -->
+  <script type="importmap">
+    {
+      "imports": {
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-900 text-slate-200">
+  
+  <div id="root"></div>
+
+  <!-- Main Application Script -->
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useMemo, useCallback } = React;
+    
+    import { initializeApp } from 'firebase/app';
+    import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+    import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, deleteDoc } from 'firebase/firestore';
+
+    // --- FIREBASE INITIALIZATION ---
+    // If you host this on your own GitHub Pages, you will need to replace the empty {} below 
+    // with your own Firebase project configuration object to enable saving progress!
+    // Import the functions you need from the SDKs you need
+    import { initializeApp } from "firebase/app";
+    // TODO: Add SDKs for Firebase products that you want to use
+    // https://firebase.google.com/docs/web/setup#available-libraries
+    
+    // Your web app's Firebase configuration
+    const fallbackConfig = {
+      apiKey: "AIzaSyB0t-rl_hFGrxk5AjTxZzicjSgstc7lU7Q",
+      authDomain: "aerospace-medicine-qbank.firebaseapp.com",
+      projectId: "aerospace-medicine-qbank",
+      storageBucket: "aerospace-medicine-qbank.firebasestorage.app",
+      messagingSenderId: "1085728932203",
+      appId: "1:1085728932203:web:c948d750b4560a726c8c2e"
+    };
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig); 
+    
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : fallbackConfig;
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'aero-med-quiz-app';
+    
+    let app, auth, db;
+    try {
+      if (Object.keys(firebaseConfig).length > 0) {
+        app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+      } else {
+        console.warn("Firebase config is empty. App will run in local-only mode. Provide a config to enable saving.");
+      }
+    } catch (e) {
+      console.error("Firebase Initialization Error:", e);
+    }
+
+    // --- CSV PARSING UTILITIES ---
+    const parseCSV = (text) => {
+      const result = [];
+      let row = [];
+      let inQuotes = false;
+      let cell = '';
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (char === '"' && text[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          row.push(cell);
+          cell = '';
+        } else if ((char === '\n' || char === '\r') && !inQuotes) {
+          if (char === '\r' && text[i + 1] === '\n') i++;
+          row.push(cell);
+          result.push(row);
+          row = [];
+          cell = '';
+        } else {
+          cell += char;
+        }
+      }
+      if (row.length || cell) {
+        row.push(cell);
+        result.push(row);
+      }
+      return result;
+    };
+
+    const SHUFFLE = (array) => {
+      const arr = [...array];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    };
+
+    // --- MAIN APPLICATION COMPONENT ---
+    function App() {
+      const [user, setUser] = useState(null);
+      const [loadingApp, setLoadingApp] = useState(true);
+      
+      // Data State
+      const [questions, setQuestions] = useState([]);
+      const [topics, setTopics] = useState([]);
+      
+      // User Firestore State
+      const [userStats, setUserStats] = useState({ seen: [], correct: [] });
+      const [activeQuiz, setActiveQuiz] = useState(null);
+      const [feedbackList, setFeedbackList] = useState([]);
+      
+      // App View State
+      const [view, setView] = useState('landing');
+      const [quizState, setQuizState] = useState(null);
+      
+      // Setup Form State
+      const [selectedTopic, setSelectedTopic] = useState('All');
+      const [selectedPoolType, setSelectedPoolType] = useState('all');
+      
+      // Feedback Modal State
+      const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
+      const [feedbackText, setFeedbackText] = useState("");
+
+      // 1. Auth & Data Fetching
+      useEffect(() => {
+        if (!auth) {
+          setLoadingApp(false);
+          return; // Skip auth if Firebase isn't configured
+        }
+
+        const initAuth = async () => {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+          } catch (e) {
+            console.error("Authentication Error", e);
+          }
+        };
+        initAuth();
+        
+        const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
+          setUser(u);
+          if (!u) setLoadingApp(false);
+        });
+
+        return () => unsubscribeAuth();
+      }, []);
+
+      useEffect(() => {
+        const fetchQuestions = async () => {
+          try {
+            // Your Google Sheet CSV Export Link
+            const url = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT0ztINlDoDZyyVYQEniV_fdOwBzmxeDGKAM3ZR_L-SV3Yz4XdsdRevPPXLjWPmyaScCdMLmgqNFdLG/pub?gid=0&single=true&output=csv';
+            const response = await fetch(url);
+            const text = await response.text();
+            const rows = parseCSV(text);
+            
+            const parsedQuestions = [];
+            const uniqueTopics = new Set();
+            
+            for (let i = 1; i < rows.length; i++) {
+              const r = rows[i];
+              if (r.length < 9) continue;
+              
+              const id = (r[0] ? r[0].trim() : "") || `Q${i}`;
+              const topic = (r[1] ? r[1].trim() : "") || "Uncategorized";
+              const subTopic = r[2] ? r[2].trim() : "";
+              const questionText = r[3] ? r[3].trim() : "";
+              const choices = [r[4], r[5], r[6], r[7]].map(c => c ? c.trim() : "");
+              
+              let correct = r[8] ? r[8].trim() : "";
+              if (correct && correct.length > 1) {
+                if (correct === choices[0]) correct = 'A';
+                else if (correct === choices[1]) correct = 'B';
+                else if (correct === choices[2]) correct = 'C';
+                else if (correct === choices[3]) correct = 'D';
+              }
+              if (correct) correct = correct.replace(/[^a-dA-D]/g, '').toUpperCase().charAt(0);
+              
+              uniqueTopics.add(topic);
+              parsedQuestions.push({
+                id, topic, subTopic, question: questionText,
+                options: { A: choices[0], B: choices[1], C: choices[2], D: choices[3] },
+                correctAnswer: correct, explanation: r[9] ? r[9].trim() : ""
+              });
+            }
+            setQuestions(parsedQuestions);
+            setTopics(Array.from(uniqueTopics).sort());
+          } catch (e) {
+            console.error("Failed to load questions", e);
+          } finally {
+            if (!auth) setLoadingApp(false);
+          }
+        };
+
+        fetchQuestions();
+      }, []);
+
+      // 2. Firestore Listeners
+      useEffect(() => {
+        if (!user || !db) return;
+
+        const statsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'stats');
+        const unsubStats = onSnapshot(statsRef, (docSnap) => {
+          if (docSnap.exists()) setUserStats(docSnap.data());
+          else setUserStats({ seen: [], correct: [] });
+        }, (err) => console.error(err));
+
+        const quizRef = doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'activeQuiz');
+        const unsubQuiz = onSnapshot(quizRef, (docSnap) => {
+          if (docSnap.exists()) setActiveQuiz(docSnap.data());
+          else setActiveQuiz(null);
+          setLoadingApp(false);
+        }, (err) => console.error(err));
+
+        const feedbackCol = collection(db, 'artifacts', appId, 'public', 'data', 'feedback');
+        const unsubFeedback = onSnapshot(feedbackCol, (snap) => {
+          const list = [];
+          snap.forEach(d => list.push({ docId: d.id, ...d.data() }));
+          setFeedbackList(list);
+        }, (err) => console.error(err));
+
+        return () => { unsubStats(); unsubQuiz(); unsubFeedback(); };
+      }, [user]);
+
+      // --- ACTIONS & HANDLERS ---
+      
+      // Calculate available questions dynamically
+      const availableQuestionsCount = useMemo(() => {
+        let pool = questions;
+        const seenList = userStats?.seen || [];
+        const correctList = userStats?.correct || [];
+        
+        if (selectedTopic !== 'All') pool = pool.filter(q => q.topic === selectedTopic);
+        
+        if (selectedPoolType === 'unseen') {
+          pool = pool.filter(q => !seenList.includes(q.id));
+        } else if (selectedPoolType === 'missed') {
+          pool = pool.filter(q => seenList.includes(q.id) && !correctList.includes(q.id));
+        }
+        
+        return pool.length;
+      }, [questions, selectedTopic, selectedPoolType, userStats]);
+
+      const handleResetProgress = async () => {
+        if (!user || !db) return;
+        try {
+          await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'stats'), { seen: [], correct: [] });
+          await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'activeQuiz'));
+        } catch (e) { console.error("Error resetting", e); }
+      };
+
+      const startNewQuiz = (config) => {
+        let pool = questions;
+        const seenList = userStats?.seen || [];
+        const correctList = userStats?.correct || [];
+        
+        if (config.topic !== 'All') pool = pool.filter(q => q.topic === config.topic);
+        if (config.poolType === 'unseen') {
+          pool = pool.filter(q => !seenList.includes(q.id));
+        } else if (config.poolType === 'missed') {
+          pool = pool.filter(q => seenList.includes(q.id) && !correctList.includes(q.id));
+        }
+        
+        pool = SHUFFLE(pool);
+        if (config.count !== 'All') pool = pool.slice(0, parseInt(config.count, 10));
+
+        if (pool.length === 0) {
+          alert("No questions match your criteria.");
+          return;
+        }
+
+        const newQuizState = {
+          mode: config.mode,
+          questionIds: pool.map(q => q.id),
+          answers: {},
+          flags: {},
+          currentIndex: 0,
+          startTime: Date.now()
+        };
+        
+        setQuizState(newQuizState);
+        setView('quiz');
+        saveQuizState(newQuizState);
+      };
+
+      const resumeQuiz = () => {
+        if (activeQuiz) {
+          setQuizState(activeQuiz);
+          setView('quiz');
+        }
+      };
+
+      const saveQuizState = async (state) => {
+        if (!user || !db || !state) return;
+        try {
+          await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'activeQuiz'), state);
+        } catch (e) { console.error(e); }
+      };
+
+      const updateQuizState = (updates) => {
+        const newState = { ...quizState, ...updates };
+        setQuizState(newState);
+        saveQuizState(newState);
+      };
+
+      const submitFinalQuiz = async () => {
+        if (!quizState) return;
+        
+        const newSeen = new Set(userStats.seen || []);
+        const newCorrect = new Set(userStats.correct || []);
+        
+        quizState.questionIds.forEach(id => {
+          newSeen.add(id);
+          const q = questions.find(q => q.id === id);
+          if (q && quizState.answers[id] === q.correctAnswer) {
+            newCorrect.add(id);
+          }
+        });
+
+        if (user && db) {
+          try {
+            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'stats'), {
+              seen: Array.from(newSeen),
+              correct: Array.from(newCorrect)
+            });
+            await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'appData', 'activeQuiz'));
+          } catch (e) { console.error("Failed to update stats", e); }
+        }
+        setView('results');
+      };
+
+      const submitFeedback = async (questionId, comment) => {
+        if (!user || !db) {
+          alert("Database not connected. Feedback cannot be saved.");
+          return;
+        }
+        const q = questions.find(q => q.id === questionId);
+        try {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'feedback'), {
+            questionId,
+            questionText: (q && q.question) || "Unknown",
+            topic: (q && q.topic) || "Unknown",
+            comment,
+            userId: user.uid,
+            timestamp: Date.now()
+          });
+          alert("Feedback submitted. Thank you!");
+        } catch (e) { console.error("Failed to submit feedback", e); }
+      };
+
+      const clearFeedback = async (docId) => {
+        if (!user || !db) return;
+        try {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'feedback', docId));
+        } catch (e) { console.error("Failed to clear feedback", e); }
+      };
+
+      // --- VIEWS ---
+      if (loadingApp || questions.length === 0) {
+        return (
+          <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-indigo-500"></div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen font-sans selection:bg-indigo-500 selection:text-white pb-10">
+          
+          <header className="bg-slate-800 border-b border-slate-700 p-4 sticky top-0 z-40 shadow-md print:hidden">
+            <div className="max-w-6xl mx-auto flex items-center justify-between">
+              <div className="flex items-center gap-3 cursor-pointer group" onClick={() => setView('landing')}>
+                <div className="bg-indigo-600 p-2 rounded-lg group-hover:bg-indigo-500 transition-colors">
+                  <i className="fa-solid fa-rocket text-white text-xl"></i>
+                </div>
+                <h1 className="text-xl font-bold tracking-tight hidden sm:block">Aerospace Medicine Quiz</h1>
+              </div>
+              
+              <div className="flex gap-4">
+                {view !== 'landing' && (
+                   <button onClick={() => setView('landing')} className="text-sm text-slate-400 hover:text-white transition-colors">
+                     Dashboard
+                   </button>
+                )}
+                <button onClick={() => setView('feedbackReview')} className="text-sm flex items-center gap-2 text-slate-400 hover:text-amber-400 transition-colors">
+                  <i className="fa-solid fa-triangle-exclamation"></i> Reviewer
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-5xl mx-auto pt-8 px-4">
+            
+            {view === 'landing' && (
+              <div className="space-y-8">
+                <div className="text-center py-8 space-y-4">
+                  <h2 className="text-4xl md:text-5xl font-extrabold text-white tracking-tight">Prepare for the Mission</h2>
+                  <p className="text-lg text-slate-400 max-w-2xl mx-auto">
+                    Master aerospace medicine concepts with our dynamically tracked, customizable test bank.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                  
+                  {/* Setup Form directly on Landing Page */}
+                  <div className="lg:col-span-3 bg-slate-800 p-6 md:p-8 rounded-2xl border border-slate-700 shadow-xl">
+                    <h3 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                      <i className="fa-solid fa-gear text-indigo-400"></i> Configure New Quiz
+                    </h3>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const fd = new FormData(e.target);
+                      startNewQuiz({
+                        mode: fd.get('mode'),
+                        topic: selectedTopic,
+                        count: fd.get('count'),
+                        poolType: selectedPoolType
+                      });
+                    }} className="space-y-6">
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-slate-400 mb-2">Quiz Mode</label>
+                        <div className="grid grid-cols-2 gap-4">
+                          <label className="cursor-pointer">
+                            <input type="radio" name="mode" value="tutor" defaultChecked className="peer sr-only" />
+                            <div className="p-4 rounded-xl border border-slate-600 peer-checked:border-indigo-500 peer-checked:bg-indigo-500/10 hover:bg-slate-700 transition-all text-center">
+                              <div className="font-bold text-white mb-1">Tutor Mode</div>
+                              <div className="text-xs text-slate-400 hidden sm:block">Immediate feedback & explanations</div>
+                            </div>
+                          </label>
+                          <label className="cursor-pointer">
+                            <input type="radio" name="mode" value="test" className="peer sr-only" />
+                            <div className="p-4 rounded-xl border border-slate-600 peer-checked:border-indigo-500 peer-checked:bg-indigo-500/10 hover:bg-slate-700 transition-all text-center">
+                              <div className="font-bold text-white mb-1">Test Mode</div>
+                              <div className="text-xs text-slate-400 hidden sm:block">Simulate exam without feedback</div>
+                            </div>
+                          </label>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-400 mb-2">Topic Selection</label>
+                        <select 
+                          name="topic" 
+                          value={selectedTopic}
+                          onChange={(e) => setSelectedTopic(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-600 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        >
+                          <option value="All">All Topics (Randomized)</option>
+                          {topics.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-slate-400 mb-2">Question Count</label>
+                          <select name="count" className="w-full bg-slate-900 border border-slate-600 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none">
+                            <option value="10">10 Questions</option>
+                            <option value="25">25 Questions</option>
+                            <option value="50">50 Questions</option>
+                            <option value="All">All Available</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-400 mb-2">Question Pool</label>
+                          <select 
+                            name="poolType" 
+                            value={selectedPoolType}
+                            onChange={(e) => setSelectedPoolType(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-600 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                          >
+                            <option value="all">Include All Questions</option>
+                            <option value="unseen">Unseen Questions Only</option>
+                            <option value="missed">Missed Questions Only</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="pt-2">
+                        <div className="text-center text-sm font-medium text-indigo-300 mb-4 bg-indigo-900/30 p-3 rounded-lg border border-indigo-500/30">
+                          <i className="fa-solid fa-circle-info mr-2"></i>
+                          {availableQuestionsCount} questions available with current settings
+                        </div>
+                        <button 
+                          type="submit" 
+                          disabled={availableQuestionsCount === 0}
+                          className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 disabled:shadow-none text-white font-bold rounded-xl transition-all shadow-lg text-lg flex justify-center items-center gap-2"
+                        >
+                          <i className="fa-solid fa-play"></i> Launch Quiz
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+
+                  {/* Progress and Resume Panel */}
+                  <div className="lg:col-span-2 bg-slate-800 p-6 md:p-8 rounded-2xl border border-slate-700 shadow-xl flex flex-col justify-start">
+                    <div className="flex items-center gap-3 mb-6 border-b border-slate-700 pb-4">
+                      <i className="fa-solid fa-chart-line text-emerald-400 text-3xl"></i>
+                      <h3 className="text-2xl font-bold text-white">Your Progress</h3>
+                    </div>
+
+                    <div className="space-y-4 mb-8 flex-1">
+                      <div className="bg-slate-900 p-4 rounded-xl border border-slate-700">
+                        <p className="text-sm text-slate-400 mb-1">Questions Attempted</p>
+                        <p className="text-2xl font-bold text-white">
+                          {(userStats && userStats.seen && userStats.seen.length) || 0} <span className="text-base font-normal text-slate-500">/ {questions.length}</span>
+                        </p>
+                      </div>
+                      <div className="bg-slate-900 p-4 rounded-xl border border-slate-700">
+                        <p className="text-sm text-slate-400 mb-1">Overall Accuracy</p>
+                        <p className="text-2xl font-bold text-emerald-400">
+                          {(userStats && userStats.seen && userStats.seen.length) ? Math.round((userStats.correct.length / userStats.seen.length) * 100) : 0}%
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      {activeQuiz && (
+                        <button onClick={resumeQuiz} className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl transition-colors flex justify-center items-center gap-2 shadow-lg">
+                          <i className="fa-solid fa-floppy-disk text-lg"></i> Resume Active Quiz
+                        </button>
+                      )}
+                      
+                      <button onClick={handleResetProgress} className="w-full py-3 bg-slate-700 hover:bg-red-600/80 hover:text-white text-slate-300 font-semibold rounded-xl transition-colors flex justify-center items-center gap-2">
+                        <i className="fa-solid fa-rotate-left text-lg"></i> Reset All Progress
+                      </button>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+            {view === 'quiz' && quizState && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between text-sm text-slate-400 font-medium">
+                  <span>Question {quizState.currentIndex + 1} of {quizState.questionIds.length}</span>
+                  <button onClick={() => setView('summary')} className="flex items-center gap-2 hover:text-white bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
+                    <i className="fa-solid fa-book-open"></i> Go to Summary
+                  </button>
+                </div>
+                
+                <div className="w-full bg-slate-800 rounded-full h-2 mb-8 overflow-hidden">
+                  <div className="bg-indigo-500 h-2 rounded-full transition-all duration-300" style={{ width: `${((quizState.currentIndex) / quizState.questionIds.length) * 100}%` }}></div>
+                </div>
+
+                {(() => {
+                  const currentId = quizState.questionIds[quizState.currentIndex];
+                  const q = questions.find(x => x.id === currentId);
+                  const isAnswered = !!quizState.answers[currentId];
+                  const selectedAnswer = quizState.answers[currentId];
+                  const isCorrect = selectedAnswer === q.correctAnswer;
+                  const isFlagged = quizState.flags[currentId];
+                  
+                  if (!q) return <div>Question not found.</div>;
+
+                  return (
+                    <div className="bg-slate-800 p-6 md:p-8 rounded-2xl border border-slate-700 shadow-xl relative">
+                      <div className="absolute top-0 right-0 p-6 flex gap-4">
+                        <button onClick={() => setFeedbackModalOpen(true)} className="text-slate-500 hover:text-amber-400 transition-colors">
+                          <i className="fa-solid fa-message text-xl"></i>
+                        </button>
+                        <button onClick={() => updateQuizState({ flags: { ...quizState.flags, [currentId]: !isFlagged } })} className={`transition-colors ${isFlagged ? 'text-amber-500' : 'text-slate-500 hover:text-slate-300'}`}>
+                          <i className="fa-solid fa-flag text-xl"></i>
+                        </button>
+                      </div>
+
+                      <span className="inline-block px-3 py-1 bg-slate-900 border border-slate-700 text-indigo-400 text-xs font-bold rounded-full mb-4">
+                        {q.topic} {q.subTopic ? `• ${q.subTopic}` : ''}
+                      </span>
+
+                      <h3 className="text-xl md:text-2xl font-medium text-white mb-8 leading-relaxed">{q.question}</h3>
+
+                      <div className="space-y-3 mb-8">
+                        {Object.entries(q.options).map(([key, text]) => {
+                          if (!text) return null;
+                          let btnStyle = "bg-slate-900 border-slate-700 text-slate-300 hover:border-indigo-500 hover:bg-slate-800";
+                          let icon = null;
+
+                          if (isAnswered) {
+                            if (quizState.mode === 'tutor') {
+                              if (key === q.correctAnswer) {
+                                btnStyle = "bg-emerald-900/30 border-emerald-500 text-emerald-100";
+                                icon = <i className="fa-solid fa-circle-check text-emerald-500 text-lg"></i>;
+                              } else if (key === selectedAnswer) {
+                                btnStyle = "bg-red-900/30 border-red-500 text-red-100";
+                                icon = <i className="fa-solid fa-circle-xmark text-red-500 text-lg"></i>;
+                              } else {
+                                btnStyle = "bg-slate-900 border-slate-700 text-slate-500 opacity-50";
+                              }
+                            } else {
+                               if (key === selectedAnswer) btnStyle = "bg-indigo-900/50 border-indigo-500 text-white";
+                            }
+                          } else if (selectedAnswer === key) {
+                              btnStyle = "bg-indigo-900/50 border-indigo-500 text-white";
+                          }
+
+                          return (
+                            <button
+                              key={key}
+                              onClick={() => !((quizState.mode === 'tutor' && isAnswered)) && updateQuizState({ answers: { ...quizState.answers, [currentId]: key } })}
+                              disabled={quizState.mode === 'tutor' && isAnswered}
+                              className={`w-full text-left p-4 rounded-xl border flex items-center justify-between transition-all ${btnStyle}`}
+                            >
+                              <div className="flex items-center gap-4">
+                                <span className="font-bold w-6 text-center text-slate-500">{key}</span>
+                                <span>{text}</span>
+                              </div>
+                              {icon}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {quizState.mode === 'tutor' && isAnswered && (
+                        <div className={`p-5 rounded-xl border mb-8 ${isCorrect ? 'bg-emerald-900/20 border-emerald-500/30' : 'bg-red-900/20 border-red-500/30'}`}>
+                          <h4 className={`font-bold mb-2 flex items-center gap-2 ${isCorrect ? 'text-emerald-400' : 'text-red-400'}`}>
+                            <i className={`fa-solid ${isCorrect ? 'fa-circle-check' : 'fa-circle-xmark'}`}></i> {isCorrect ? 'Correct!' : 'Incorrect.'}
+                          </h4>
+                          <p className="text-slate-300 text-sm leading-relaxed">
+                            <span className="font-semibold text-white block mb-1">Explanation:</span> 
+                            {q.explanation || "No explanation provided."}
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="flex justify-between items-center pt-4 border-t border-slate-700">
+                        <button 
+                          onClick={() => updateQuizState({ currentIndex: Math.max(0, quizState.currentIndex - 1) })}
+                          disabled={quizState.currentIndex === 0}
+                          className="px-4 py-2 text-slate-400 hover:text-white disabled:opacity-30 flex items-center gap-2"
+                        >
+                          <i className="fa-solid fa-arrow-left"></i> Previous
+                        </button>
+                        
+                        {quizState.currentIndex < quizState.questionIds.length - 1 ? (
+                          <button onClick={() => updateQuizState({ currentIndex: quizState.currentIndex + 1 })} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg flex items-center gap-2">
+                            Next <i className="fa-solid fa-arrow-right"></i>
+                          </button>
+                        ) : (
+                          <button onClick={() => setView('summary')} className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg flex items-center gap-2">
+                            Finish & Review <i className="fa-solid fa-circle-check"></i>
+                          </button>
+                        )}
+                      </div>
+
+                      {feedbackModalOpen && (
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                          <div className="bg-slate-800 p-6 rounded-2xl max-w-lg w-full border border-slate-700 shadow-2xl">
+                            <h3 className="text-xl font-bold text-white mb-4">Report an Issue</h3>
+                            <textarea 
+                              value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)}
+                              placeholder="Explain the issue..."
+                              className="w-full h-32 bg-slate-900 border border-slate-600 rounded-xl p-3 text-white focus:ring-2 outline-none mb-4 resize-none"
+                            ></textarea>
+                            <div className="flex justify-end gap-3">
+                              <button onClick={() => setFeedbackModalOpen(false)} className="px-4 py-2 text-slate-400 hover:text-white">Cancel</button>
+                              <button onClick={() => { submitFeedback(currentId, feedbackText); setFeedbackModalOpen(false); setFeedbackText(""); }} disabled={!feedbackText.trim()} className="px-4 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50">Submit</button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {view === 'summary' && quizState && (
+              <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-xl max-w-3xl mx-auto">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                  <i className="fa-solid fa-book-open text-indigo-400"></i> Quiz Summary
+                </h2>
+                <div className="flex gap-6 mb-8 text-sm text-slate-400">
+                  <div className="flex items-center gap-2"><div className="w-3 h-3 bg-indigo-500 rounded-full"></div> Answered</div>
+                  <div className="flex items-center gap-2"><div className="w-3 h-3 bg-slate-600 rounded-full"></div> Unanswered</div>
+                  <div className="flex items-center gap-2"><div className="w-3 h-3 bg-amber-500 rounded-full"></div> Flagged</div>
+                </div>
+
+                <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-3 mb-10">
+                  {quizState.questionIds.map((id, index) => {
+                    const isAnswered = !!quizState.answers[id];
+                    const isFlagged = quizState.flags[id];
+                    let btnColor = "bg-slate-700 text-slate-400 hover:bg-slate-600";
+                    if (isAnswered) btnColor = "bg-indigo-600 text-white hover:bg-indigo-500";
+                    if (isFlagged) btnColor = "bg-amber-600 text-white hover:bg-amber-500 border-2 border-amber-400";
+
+                    return (
+                      <button key={id} onClick={() => { updateQuizState({ currentIndex: index }); setView('quiz'); }} className={`w-full aspect-square flex items-center justify-center font-bold rounded-lg transition-colors ${btnColor}`}>
+                        {index + 1}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                <div className="flex justify-between items-center border-t border-slate-700 pt-6">
+                  <button onClick={() => setView('quiz')} className="px-6 py-3 text-slate-300 hover:text-white">Back to Quiz</button>
+                  <button onClick={submitFinalQuiz} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg">Submit for Grading</button>
+                </div>
+              </div>
+            )}
+
+            {view === 'results' && quizState && (
+              <div className="bg-white print:shadow-none print:border-none print:p-0 text-slate-900 p-8 rounded-2xl border border-slate-200 shadow-xl max-w-4xl mx-auto">
+                <div className="flex justify-between items-start mb-8 print:mb-4 border-b pb-6 print:border-slate-800">
+                  <div>
+                    <h2 className="text-3xl font-extrabold text-slate-900">Final Evaluation Report</h2>
+                    <p className="text-slate-500 mt-1">Aerospace Medicine Training Program</p>
+                    <p className="text-slate-500 text-sm mt-1">Date: {new Date().toLocaleDateString()}</p>
+                  </div>
+                  <div className="text-right print:hidden">
+                    <button onClick={() => window.print()} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg flex items-center gap-2 border border-slate-300">
+                      <i className="fa-solid fa-print"></i> Print / Save PDF
+                    </button>
+                  </div>
+                </div>
+
+                {(() => {
+                  let correctCount = 0;
+                  const total = quizState.questionIds.length;
+                  quizState.questionIds.forEach(id => {
+                    const q = questions.find(x => x.id === id);
+                    if (q && quizState.answers[id] === q.correctAnswer) correctCount++;
+                  });
+                  const percentage = Math.round((correctCount / total) * 100);
+
+                  return (
+                    <>
+                      <div className="flex gap-8 mb-10 bg-slate-50 p-6 rounded-xl border border-slate-100 print:bg-transparent print:p-0 print:border-none">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Final Score</div>
+                          <div className="text-5xl font-black text-slate-900">{percentage}%</div>
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Questions Correct</div>
+                          <div className="text-3xl font-bold text-slate-700">{correctCount} <span className="text-lg font-normal text-slate-400">/ {total}</span></div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-8 print:space-y-6">
+                        <h3 className="text-xl font-bold border-b pb-2 print:text-lg">Detailed Review</h3>
+                        {quizState.questionIds.map((id, index) => {
+                          const q = questions.find(x => x.id === id);
+                          const selected = quizState.answers[id];
+                          const isCorrect = selected === (q ? q.correctAnswer : null);
+                          if (!q) return null;
+
+                          return (
+                            <div key={id} className={`p-5 rounded-xl border ${isCorrect ? 'border-emerald-200 bg-emerald-50/30' : 'border-red-200 bg-red-50/30'} print:border-slate-300 print:bg-transparent print:break-inside-avoid`}>
+                              <div className="flex gap-3 mb-3">
+                                <span className="font-bold text-slate-900">{index + 1}.</span>
+                                <div className="flex-1">
+                                  <p className="font-medium text-slate-900 mb-3">{q.question}</p>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm mb-4">
+                                    {Object.entries(q.options).map(([k, text]) => {
+                                      if (!text) return null;
+                                      const isSelected = selected === k;
+                                      const isActualCorrect = q.correctAnswer === k;
+                                      let style = "text-slate-600";
+                                      if (isActualCorrect) style = "font-bold text-emerald-700 bg-emerald-100 px-2 rounded";
+                                      else if (isSelected) style = "font-bold text-red-600 line-through";
+                                      return (
+                                        <div key={k} className={style}>
+                                          {k}) {text} {isSelected && !isActualCorrect && "(Your Answer)"}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  <div className="text-sm text-slate-600 bg-white p-3 rounded border border-slate-100 print:border-slate-300">
+                                    <span className="font-bold text-slate-900">Explanation:</span> {q.explanation}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      <div className="mt-12 text-center print:hidden">
+                        <button onClick={() => { setQuizState(null); setView('landing'); }} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg">
+                          Return to Dashboard
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {view === 'feedbackReview' && (
+              <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-xl max-w-4xl mx-auto">
+                <h2 className="text-2xl font-bold text-white mb-2 flex items-center gap-3">
+                  <i className="fa-solid fa-file-lines text-amber-400"></i> Reviewer Dashboard
+                </h2>
+                <p className="text-slate-400 mb-8">Manage user-submitted feedback on questions. Update the Google Sheet directly, then clear items here.</p>
+
+                {feedbackList.length === 0 ? (
+                  <div className="text-center py-12 bg-slate-900 rounded-xl border border-slate-700 border-dashed">
+                    <i className="fa-solid fa-circle-check text-emerald-500 text-5xl mx-auto mb-3 block"></i>
+                    <h3 className="text-lg font-bold text-white">All Caught Up!</h3>
+                    <p className="text-slate-500">No pending feedback from users.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {feedbackList.sort((a,b) => b.timestamp - a.timestamp).map(f => (
+                      <div key={f.docId} className="bg-slate-900 border border-slate-700 rounded-xl p-5 flex flex-col md:flex-row gap-5 items-start">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-2">
+                            <span className="bg-amber-500/20 text-amber-400 px-2 py-1 rounded text-xs font-bold border border-amber-500/30">ID: {f.questionId}</span>
+                            <span className="text-slate-500 text-xs">{new Date(f.timestamp).toLocaleString()}</span>
+                          </div>
+                          <p className="text-white font-medium mb-3 italic">"{f.questionText}"</p>
+                          <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 text-sm text-slate-300">
+                            <span className="font-bold text-amber-400">User Comment:</span> {f.comment}
+                          </div>
+                        </div>
+                        <button onClick={() => clearFeedback(f.docId)} className="shrink-0 flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-emerald-600/20 hover:text-emerald-400 border border-slate-700 rounded-lg transition-all">
+                          <i className="fa-solid fa-trash-can"></i> Clear
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    // Mount the Application
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
